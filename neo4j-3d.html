@@ -1,0 +1,695 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Neo4j 3D Graph Explorer</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+
+<!-- Pinned versions on purpose: bare unpkg specifiers float to "latest" and break silently.
+     SRI hashes pin the bytes too: this page handles database credentials, so a compromised
+     or swapped CDN response would otherwise run with full access to them. A mismatch blocks
+     the script rather than executing it. Recompute if you bump a version:
+       curl -sL <url> | openssl dgst -sha384 -binary | openssl base64 -A -->
+<script src="https://unpkg.com/neo4j-driver@6.2.0/lib/browser/neo4j-web.min.js"
+        integrity="sha384-XL9S5JpzFAZNVfO6Luba6S1XqQ6NLtJzuD/Zrzqnr5pWkfzqJRu56AUChcIV3hbg"
+        crossorigin="anonymous" referrerpolicy="no-referrer"></script>
+<script src="https://unpkg.com/3d-force-graph@1.80.0/dist/3d-force-graph.min.js"
+        integrity="sha384-Y7bC2PBKu8ujxtvo5+Z61OeGdSVRzFsYWBK4i5dnL/U6aFDTodk61qOUkTfInaxS"
+        crossorigin="anonymous" referrerpolicy="no-referrer"></script>
+
+<style>
+  :root {
+    --bg: #0d1117; --panel: #161b22; --edge: #30363d; --fg: #e6edf3;
+    --muted: #8b949e; --accent: #4f9cf9; --ok: #3fb950; --err: #f85149;
+    --field: #0d1117;
+  }
+  :root[data-theme="light"] {
+    --bg: #ffffff; --panel: #f6f8fa; --edge: #d0d7de; --fg: #1f2328;
+    --muted: #656d76; --accent: #0969da; --ok: #1a7f37; --err: #cf222e;
+    --field: #ffffff;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; overflow: hidden;
+    font: 13px/1.45 ui-sans-serif, -apple-system, "Segoe UI", Roboto, sans-serif;
+    background: var(--bg); color: var(--fg); }
+  #app { display: flex; height: 100%; }
+
+  #side { width: 340px; flex: 0 0 340px; background: var(--panel);
+    border-right: 1px solid var(--edge); overflow-y: auto; padding: 14px; }
+  #side.collapsed { display: none; }
+  #main { flex: 1; position: relative; min-width: 0; }
+  #graph { position: absolute; inset: 0; }
+
+  h1 { font-size: 15px; margin: 0 0 2px; letter-spacing: .2px; }
+  .sub { color: var(--muted); font-size: 11px; margin-bottom: 14px; }
+  fieldset { border: 1px solid var(--edge); border-radius: 6px; margin: 0 0 12px; padding: 10px; }
+  legend { color: var(--muted); font-size: 11px; text-transform: uppercase;
+    letter-spacing: .6px; padding: 0 4px; }
+  label { display: block; color: var(--muted); font-size: 11px; margin: 8px 0 3px; }
+  label:first-of-type { margin-top: 0; }
+  input[type=range] { width: 100%; accent-color: var(--accent); }
+  input[type=text], input[type=password], input[type=number], select, textarea {
+    width: 100%; background: var(--field); color: var(--fg); border: 1px solid var(--edge);
+    border-radius: 5px; padding: 6px 8px; font-size: 12px; font-family: inherit; }
+  textarea { font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 12px; resize: vertical; min-height: 92px; }
+  input:focus, select:focus, textarea:focus { outline: none; border-color: var(--accent); }
+  .row { display: flex; gap: 8px; }
+  .row > * { flex: 1; min-width: 0; }
+  .check { display: flex; align-items: center; gap: 6px; color: var(--muted);
+    font-size: 11px; margin: 7px 0; cursor: pointer; }
+  .check input { width: auto; margin: 0; accent-color: var(--accent); }
+  button { background: var(--panel); color: var(--fg); border: 1px solid var(--edge);
+    border-radius: 5px; padding: 7px 10px; font-size: 12px; cursor: pointer; font-family: inherit; }
+  button:hover { border-color: var(--accent); }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #06131f; font-weight: 600; }
+  button:disabled { opacity: .5; cursor: default; }
+  .btns { display: flex; gap: 8px; margin-top: 10px; }
+
+  #status { padding: 8px; border-radius: 5px; font-size: 11px; background: var(--field);
+    border: 1px solid var(--edge); color: var(--muted); word-break: break-word;
+    max-height: 160px; overflow-y: auto; white-space: pre-wrap; }
+  #status.ok { border-color: var(--ok); color: var(--ok); }
+  #status.err { border-color: var(--err); color: var(--err); }
+
+  #toggle { position: absolute; top: 10px; left: 10px; z-index: 10; }
+  #hint { position: absolute; bottom: 8px; left: 50%; transform: translateX(-50%);
+    color: var(--muted); font-size: 11px; background: var(--panel); opacity: .85;
+    padding: 4px 10px; border-radius: 10px; pointer-events: none; }
+
+  #details { position: absolute; top: 10px; right: 10px; width: 290px; max-height: 70%;
+    overflow-y: auto; background: var(--panel); border: 1px solid var(--edge);
+    border-radius: 6px; padding: 10px; display: none; }
+  #details h2 { font-size: 12px; margin: 0 0 8px; }
+  #details table { width: 100%; border-collapse: collapse; font-size: 11px; }
+  #details td { padding: 2px 4px; vertical-align: top; border-top: 1px solid var(--edge); }
+  #details td:first-child { color: var(--muted); white-space: nowrap; width: 34%; }
+  #details td:last-child { word-break: break-word; font-family: ui-monospace, Menlo, monospace; }
+  .pill { display: inline-block; background: var(--field); border: 1px solid var(--edge); border-radius: 8px;
+    padding: 1px 7px; font-size: 10px; color: var(--muted); margin-right: 4px; }
+  .x { float: right; cursor: pointer; color: var(--muted); }
+  .x:hover { color: var(--fg); }
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="side">
+    <h1>Neo4j 3D Graph Explorer</h1>
+    <div class="sub">Any Bolt database &rarr; 3D force-directed layout</div>
+
+    <fieldset>
+      <legend>Connection</legend>
+      <label>Bolt URI</label>
+      <input type="text" id="uri" placeholder="bolt://localhost:7687" spellcheck="false">
+      <div class="row">
+        <div><label>User</label><input type="text" id="user" spellcheck="false"></div>
+        <div><label>Password</label><input type="password" id="pass"></div>
+      </div>
+      <label>Database <span style="opacity:.6">(blank = default)</span></label>
+      <input type="text" id="db" spellcheck="false">
+      <label class="check"><input type="checkbox" id="savePass">Remember password in localStorage</label>
+    </fieldset>
+
+    <fieldset>
+      <legend>Query</legend>
+      <label>Preset</label>
+      <select id="preset"></select>
+      <label>Cypher <span style="opacity:.6">($limit is bound below)</span></label>
+      <textarea id="query" spellcheck="false"></textarea>
+      <label>Limit / max rows</label>
+      <input type="number" id="limit" min="1" max="100000" step="100">
+      <div class="btns">
+        <button class="primary" id="run" style="flex:2">Run</button>
+        <button id="clear">Clear</button>
+      </div>
+    </fieldset>
+
+    <fieldset>
+      <legend>Display</legend>
+      <label>Color nodes by</label>
+      <select id="colorBy"></select>
+      <label>Size nodes by</label>
+      <select id="sizeBy"></select>
+      <label>Caption</label>
+      <select id="captionBy"></select>
+      <label>Theme</label>
+      <select id="theme">
+        <option value="dark">Dark</option>
+        <option value="light">Light &mdash; clearer for dense graphs</option>
+      </select>
+      <label>Relationship contrast <span id="loVal" style="opacity:.6"></span></label>
+      <input type="range" id="linkOpacity" min="0.1" max="1" step="0.05">
+      <label>Relationship thickness <span id="lwVal" style="opacity:.6"></span></label>
+      <input type="range" id="linkWidth" min="0" max="3" step="0.25">
+      <label>Camera controls <span style="opacity:.6">(rebuilds view)</span></label>
+      <select id="controlType">
+        <option value="trackball">Trackball &mdash; free rotate + pan</option>
+        <option value="orbit">Orbit &mdash; upright horizon</option>
+        <option value="fly">Fly &mdash; WASD/RF + mouse look</option>
+      </select>
+      <label class="check"><input type="checkbox" id="pinDrag" checked>Pin nodes where I drop them</label>
+      <label class="check"><input type="checkbox" id="arrows" checked>Directional arrows</label>
+      <div class="btns">
+        <button id="fit" style="flex:1">Fit view</button>
+        <button id="unpin" style="flex:1">Unpin all</button>
+      </div>
+    </fieldset>
+
+    <fieldset>
+      <legend>Status</legend>
+      <div id="status">Not connected.</div>
+    </fieldset>
+  </div>
+
+  <div id="main">
+    <button id="toggle">&#9776;</button>
+    <div id="graph"></div>
+    <div id="details"></div>
+    <div id="hint">drag background to rotate &middot; scroll to zoom &middot; drag a node to move it &middot; click a node for details</div>
+  </div>
+</div>
+
+<script>
+"use strict";
+const $ = id => document.getElementById(id);
+
+/* ------------------------------------------------------------------ *
+ * Presets
+ * ------------------------------------------------------------------ */
+const PRESETS = {
+  "All relationships": "MATCH (n)-[r]->(m)\nRETURN n, r, m\nLIMIT $limit",
+  "Schema (meta-graph)": "CALL db.schema.visualization()",
+  "Nodes only": "MATCH (n)\nRETURN n\nLIMIT $limit",
+  "Paths (up to 2 hops)": "MATCH p = ()-[*1..2]-()\nRETURN p\nLIMIT $limit"
+};
+
+const DEFAULTS = {
+  uri: "bolt://localhost:7687", user: "neo4j",
+  pass: "", db: "", limit: 500,
+  query: PRESETS["All relationships"], savePass: false,
+  controlType: "trackball", pinDrag: true, arrows: true,
+  theme: "dark", linkOpacity: 0.6, linkWidth: 0
+};
+
+/* ------------------------------------------------------------------ *
+ * Neo4j value -> plain JS
+ * ------------------------------------------------------------------ */
+function toJS(v) {
+  if (v === null || v === undefined) return null;
+  if (neo4j.isInt(v)) return v.inSafeRange() ? v.toNumber() : v.toString();
+  if (neo4j.isPoint(v)) return v.z === undefined || v.z === null
+    ? `point(${v.x}, ${v.y})` : `point(${v.x}, ${v.y}, ${v.z})`;
+  if (neo4j.isDate(v) || neo4j.isDateTime(v) || neo4j.isLocalDateTime(v) ||
+      neo4j.isTime(v) || neo4j.isLocalTime(v) || neo4j.isDuration(v)) return v.toString();
+  if (typeof neo4j.isVector === "function" && neo4j.isVector(v)) return `vector[${v.toString().length}]`;
+  if (Array.isArray(v)) return v.map(toJS);
+  if (v instanceof Date) return v.toISOString();
+  if (typeof v === "object") {
+    const o = {};
+    for (const k of Object.keys(v)) o[k] = toJS(v[k]);
+    return o;
+  }
+  return v;
+}
+const props = e => toJS(e.properties || {});
+
+// elementId is the stable string id. Never .toNumber() identity: ids can exceed 2^53.
+const nodeKey = n => n.elementId != null ? String(n.elementId) : String(n.identity);
+const relKey  = r => r.elementId != null ? String(r.elementId) : String(r.identity);
+const relStart = r => r.startNodeElementId != null ? String(r.startNodeElementId) : String(r.start);
+const relEnd   = r => r.endNodeElementId != null ? String(r.endNodeElementId) : String(r.end);
+
+/* ------------------------------------------------------------------ *
+ * Generic harvesting: walk anything a query returns and pull out
+ * nodes / relationships / paths, wherever they are nested.
+ * ------------------------------------------------------------------ */
+function makeCollector() {
+  const nodes = new Map(), links = new Map();
+  let scalarSeq = 0;
+
+  function addNode(n) {
+    const id = nodeKey(n);
+    const rec = {
+      id,
+      labels: n.labels ? Array.from(n.labels) : [],
+      p: props(n),
+      stub: false
+    };
+    const prev = nodes.get(id);
+    // A fuller copy wins; keep any layout coords already assigned.
+    if (!prev || prev.stub || Object.keys(rec.p).length >= Object.keys(prev.p).length) {
+      if (prev) { rec.x = prev.x; rec.y = prev.y; rec.z = prev.z;
+                  rec.fx = prev.fx; rec.fy = prev.fy; rec.fz = prev.fz; }
+      nodes.set(id, rec);
+    }
+    return id;
+  }
+
+  function addStub(id) {
+    if (!nodes.has(id)) nodes.set(id, { id, labels: [], p: {}, stub: true });
+  }
+
+  function addRel(r) {
+    const id = relKey(r), s = relStart(r), t = relEnd(r);
+    if (s === "undefined" || t === "undefined") return; // unbound rel, no endpoints
+    links.set(id, { id, source: s, target: t, type: r.type, p: props(r) });
+  }
+
+  // Fallback for the classic `RETURN a AS source, b AS target` shape.
+  function addScalarLink(source, target, extra) {
+    const s = String(source), t = String(target);
+    for (const v of [s, t]) if (!nodes.has(v)) nodes.set(v, { id: v, labels: [], p: { value: v }, stub: false });
+    const id = "s:" + (scalarSeq++);
+    links.set(id, { id, source: s, target: t, type: extra && extra.type ? String(extra.type) : "", p: extra || {} });
+  }
+
+  function harvest(v, depth) {
+    if (v === null || v === undefined || depth > 12) return;
+    if (neo4j.isNode(v)) { addNode(v); return; }
+    if (neo4j.isRelationship(v)) { addRel(v); return; }
+    if (neo4j.isPath(v)) {
+      addNode(v.start); addNode(v.end);
+      for (const seg of v.segments) { addNode(seg.start); addNode(seg.end); addRel(seg.relationship); }
+      return;
+    }
+    if (neo4j.isPathSegment(v)) { addNode(v.start); addNode(v.end); addRel(v.relationship); return; }
+    if (Array.isArray(v)) { for (const x of v) harvest(x, depth + 1); return; }
+    // A plain map may carry entities in its values (e.g. db.schema.visualization()).
+    if (typeof v === "object" && !neo4j.isInt(v) && !neo4j.isPoint(v) &&
+        !(v instanceof Date) && typeof v.toString === "function" &&
+        Object.getPrototypeOf(v) === Object.prototype) {
+      for (const k of Object.keys(v)) harvest(v[k], depth + 1);
+    }
+  }
+
+  function finish() {
+    // Links whose endpoints were never returned get a placeholder node rather
+    // than being dropped, so the row count you ran always matches what you see.
+    let stubs = 0;
+    for (const l of links.values()) {
+      if (!nodes.has(l.source)) { addStub(l.source); stubs++; }
+      if (!nodes.has(l.target)) { addStub(l.target); stubs++; }
+    }
+    return { nodes: Array.from(nodes.values()), links: Array.from(links.values()), stubs };
+  }
+
+  return { harvest, addScalarLink, finish };
+}
+
+function recordsToGraph(records) {
+  const c = makeCollector();
+  for (const r of records) {
+    const keys = r.keys.map(String);
+    let sawEntity = false;
+    for (const k of keys) {
+      const raw = r.get(k);
+      if (neo4j.isNode(raw) || neo4j.isRelationship(raw) || neo4j.isPath(raw) || neo4j.isPathSegment(raw)) sawEntity = true;
+      c.harvest(raw, 0);
+    }
+    // Only fall back to the scalar shape if this row returned no graph entities.
+    if (!sawEntity && keys.includes("source") && keys.includes("target")) {
+      const s = toJS(r.get("source")), t = toJS(r.get("target"));
+      if (s !== null && t !== null) {
+        const extra = {};
+        for (const k of keys) if (k !== "source" && k !== "target") extra[k] = toJS(r.get(k));
+        c.addScalarLink(s, t, extra);
+      }
+    }
+  }
+  return c.finish();
+}
+
+/* ------------------------------------------------------------------ *
+ * Accessors
+ * ------------------------------------------------------------------ */
+// Link colour is set here alone — never also as an alpha inside linkColor, or the
+// two multiply and the relationships fade out almost completely.
+const THEMES = {
+  dark:  { bg: "#0d1117", link: "#aab6c8" },
+  light: { bg: "#ffffff", link: "#41505f" }
+};
+const theme = () => THEMES[$("theme").value] || THEMES.dark;
+
+const CAPTION_KEYS = ["name", "title", "caption", "label", "displayName", "key", "id", "uuid", "value"];
+
+function autoCaption(n) {
+  for (const k of CAPTION_KEYS) if (n.p[k] !== undefined && n.p[k] !== null) return String(n.p[k]);
+  return (n.labels[0] || "Node") + " " + n.id;
+}
+function nodeGroup(n) { return n.labels.join(":") || "(no label)"; }
+
+let colorKey = "__label", sizeKey = "__none", captionKey = "__auto";
+
+function nodeColorGroup(n) {
+  if (colorKey === "__label") return nodeGroup(n);
+  if (colorKey === "__none") return "all";
+  const v = n.p[colorKey];
+  return v === undefined || v === null ? "(null)" : String(v);
+}
+let sizeMin = 0, sizeMax = 1;
+function rescaleSizes(nodes) {
+  if (sizeKey === "__none") { sizeMin = 0; sizeMax = 1; return; }
+  let lo = Infinity, hi = -Infinity;
+  for (const n of nodes) {
+    const v = Number(n.p[sizeKey]);
+    if (Number.isFinite(v)) { if (v < lo) lo = v; if (v > hi) hi = v; }
+  }
+  sizeMin = Number.isFinite(lo) ? lo : 0;
+  sizeMax = Number.isFinite(hi) && hi > lo ? hi : sizeMin + 1;
+}
+// Raw property values span arbitrary ranges (pagerank ~0.1, a count ~10000), so
+// normalise onto a fixed sphere-volume range instead of feeding them in directly.
+function nodeSize(n) {
+  if (sizeKey === "__none") return 1;
+  const v = Number(n.p[sizeKey]);
+  if (!Number.isFinite(v)) return 0.5;
+  return 0.5 + 7.5 * ((v - sizeMin) / (sizeMax - sizeMin));
+}
+function nodeCaption(n) {
+  if (n.stub) return "(not returned) " + n.id;
+  if (captionKey === "__auto") return autoCaption(n);
+  const v = n.p[captionKey];
+  return v === undefined || v === null ? autoCaption(n) : String(v);
+}
+function nodeTooltip(n) {
+  const l = n.labels.length ? ":" + n.labels.join(":") + " " : "";
+  return `<div style="font:12px sans-serif;background:var(--panel);color:var(--fg);
+    padding:4px 8px;border-radius:4px;border:1px solid var(--edge)">${esc(l + nodeCaption(n))}</div>`;
+}
+function linkTooltip(l) {
+  return `<div style="font:12px sans-serif;background:var(--panel);color:var(--fg);
+    padding:3px 7px;border-radius:4px;border:1px solid var(--edge)">${esc(l.type || "—")}</div>`;
+}
+const esc = s => String(s).replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+
+/* ------------------------------------------------------------------ *
+ * Graph view
+ * ------------------------------------------------------------------ */
+let Graph = null, data = { nodes: [], links: [] }, fitTimers = [];
+
+// The layout keeps expanding for seconds after load, so a single fit lands on a
+// stale extent. onEngineStop proved unreliable in v1.80, so re-fit on a schedule:
+// the first pass gives an immediate usable view, the later ones track the spread.
+function scheduleFit() {
+  fitTimers.forEach(clearTimeout);
+  fitTimers = [400, 1500, 3500].map(ms =>
+    setTimeout(() => Graph && Graph.graphData().nodes.length && Graph.zoomToFit(500, 60), ms));
+}
+
+function buildGraph() {
+  const el = $("graph");
+  if (Graph && typeof Graph._destructor === "function") Graph._destructor();
+  el.innerHTML = "";
+
+  Graph = new ForceGraph3D(el, { controlType: $("controlType").value })
+    .backgroundColor(theme().bg)
+    .nodeRelSize(4)
+    .warmupTicks(50)
+    .cooldownTime(8000)
+    .nodeAutoColorBy(nodeColorGroup)
+    .nodeVal(nodeSize)
+    .nodeLabel(nodeTooltip)
+    .nodeOpacity(0.9)
+    .linkLabel(linkTooltip)
+    .linkDirectionalArrowRelPos(1)
+    .onNodeClick(showDetails)
+    .onNodeDragEnd(n => {
+      if ($("pinDrag").checked) { n.fx = n.x; n.fy = n.y; n.fz = n.z; }
+    })
+    .onBackgroundClick(() => { $("details").style.display = "none"; });
+
+  applyDisplay();
+  Graph.graphData(data);
+  sizeGraph();
+}
+
+function applyDisplay() {
+  if (!Graph) return;
+  const lw = parseFloat($("linkWidth").value);
+  $("loVal").textContent = "(" + Math.round(parseFloat($("linkOpacity").value) * 100) + "%)";
+  $("lwVal").textContent = lw === 0 ? "(thin lines)" : "(" + lw + ")";
+  Graph.linkColor(() => theme().link)
+       .linkOpacity(parseFloat($("linkOpacity").value))
+       // Width 0 draws constant 1px lines, which stay visible when zoomed out;
+       // anything above 0 draws tubes that shrink with distance.
+       .linkWidth(lw)
+       .linkDirectionalArrowLength($("arrows").checked ? 3.5 : 0)
+       .nodeAutoColorBy(nodeColorGroup)
+       .nodeVal(nodeSize)
+       .nodeLabel(nodeTooltip);
+}
+
+function applyTheme() {
+  document.documentElement.setAttribute("data-theme", $("theme").value);
+  if (Graph) Graph.backgroundColor(theme().bg);
+  applyDisplay();
+}
+
+function sizeGraph() {
+  if (!Graph) return;
+  const m = $("main");
+  Graph.width(m.clientWidth).height(m.clientHeight);
+}
+window.addEventListener("resize", sizeGraph);
+
+function showDetails(n) {
+  const d = $("details");
+  const rows = Object.entries(n.p)
+    .map(([k, v]) => `<tr><td>${esc(k)}</td><td>${esc(fmt(v))}</td></tr>`).join("");
+  d.innerHTML =
+    `<span class="x" onclick="document.getElementById('details').style.display='none'">&times;</span>
+     <h2>${esc(nodeCaption(n))}</h2>
+     <div style="margin-bottom:8px">${(n.labels.length ? n.labels : ["(no label)"])
+       .map(l => `<span class="pill">${esc(l)}</span>`).join("")}</div>
+     <div class="btns" style="margin:0 0 10px">
+       <button id="dFocus" style="flex:1">Focus</button>
+       <button id="dPin" style="flex:1">${n.fx != null ? "Unpin" : "Pin"}</button>
+     </div>
+     <table>${rows || '<tr><td colspan="2" style="color:#8b949e">no properties</td></tr>'}</table>
+     <div style="margin-top:8px;color:#8b949e;font-size:10px">id ${esc(n.id)}</div>`;
+  d.style.display = "block";
+  $("dFocus").onclick = () => {
+    const dist = 90, r = Math.hypot(n.x, n.y, n.z) || 1;
+    Graph.cameraPosition({ x: n.x * (1 + dist / r), y: n.y * (1 + dist / r), z: n.z * (1 + dist / r) }, n, 900);
+  };
+  $("dPin").onclick = () => {
+    if (n.fx != null) { n.fx = n.fy = n.fz = undefined; }
+    else { n.fx = n.x; n.fy = n.y; n.fz = n.z; }
+    Graph.d3ReheatSimulation();
+    showDetails(n);
+  };
+}
+function fmt(v) {
+  if (v === null) return "null";
+  if (Array.isArray(v)) {
+    // Embedding vectors would otherwise fill the whole panel.
+    const head = v.slice(0, 6).map(fmt).join(", ");
+    return v.length > 6 ? `[${head}, … ${v.length} values]` : `[${head}]`;
+  }
+  if (typeof v === "object") return JSON.stringify(v);
+  const s = String(v);
+  return s.length > 200 ? s.slice(0, 200) + "…" : s;
+}
+
+/* ------------------------------------------------------------------ *
+ * Property dropdowns
+ * ------------------------------------------------------------------ */
+function refreshSelectors(nodes) {
+  const all = new Set(), numeric = new Set();
+  for (const n of nodes) {
+    for (const [k, v] of Object.entries(n.p)) {
+      all.add(k);
+      if (typeof v === "number" && Number.isFinite(v)) numeric.add(k);
+    }
+  }
+  const A = Array.from(all).sort(), N = Array.from(numeric).sort();
+  fill($("colorBy"), [["__label", "Node label"], ["__none", "Uniform"]].concat(A.map(k => [k, k])), colorKey);
+  fill($("sizeBy"), [["__none", "Uniform"]].concat(N.map(k => [k, k])), sizeKey);
+  fill($("captionBy"), [["__auto", "Auto (name/title/…)"]].concat(A.map(k => [k, k])), captionKey);
+}
+function fill(sel, pairs, current) {
+  const keep = pairs.some(p => p[0] === current) ? current : pairs[0][0];
+  sel.innerHTML = pairs.map(([v, t]) =>
+    `<option value="${esc(v)}"${v === keep ? " selected" : ""}>${esc(t)}</option>`).join("");
+  sel.value = keep;
+}
+
+/* ------------------------------------------------------------------ *
+ * Status
+ * ------------------------------------------------------------------ */
+function status(msg, kind) {
+  const s = $("status");
+  s.textContent = msg;
+  s.className = kind || "";
+}
+
+/* ------------------------------------------------------------------ *
+ * Run
+ * ------------------------------------------------------------------ */
+let driver = null, driverSig = "";
+
+function ensureDriver() {
+  const uri = $("uri").value.trim(), user = $("user").value, pass = $("pass").value,
+        sig = uri + "|" + user + "|" + pass;
+  if (driver && sig === driverSig) return driver;
+  if (driver) driver.close();
+  // Encryption comes from the URI scheme (neo4j+s / bolt+s). Passing an
+  // `encrypted` config option alongside a +s scheme makes the driver throw.
+  driver = neo4j.driver(uri, user ? neo4j.auth.basic(user, pass) : undefined,
+                        { disableLosslessIntegers: false });
+  driverSig = sig;
+  return driver;
+}
+
+async function run() {
+  const btn = $("run");
+  if (!$("uri").value.trim()) {
+    status("Enter a Bolt URI — bolt://localhost:7687 for a local server, " +
+           "or neo4j+s://<host> for Aura.", "err");
+    return;
+  }
+  btn.disabled = true;
+  const limit = Math.max(1, parseInt($("limit").value, 10) || 500);
+  const query = $("query").value;
+  const dbName = $("db").value.trim();
+  let session;
+  const t0 = performance.now();
+  try {
+    status("Connecting…");
+    const d = ensureDriver();
+    await d.verifyConnectivity();
+    status("Running query…");
+    session = d.session(dbName ? { database: dbName } : {});
+    const res = await session.run(query, { limit: neo4j.int(limit) });
+    const tQuery = performance.now() - t0;
+
+    const records = res.records.length > limit ? res.records.slice(0, limit) : res.records;
+    const truncated = res.records.length - records.length;
+
+    const g = recordsToGraph(records);
+    data = { nodes: g.nodes, links: g.links };
+    refreshSelectors(g.nodes);
+    rescaleSizes(g.nodes);
+    if (!Graph) buildGraph(); else { applyDisplay(); Graph.graphData(data); }
+    scheduleFit();
+
+    let msg = `${g.nodes.length} nodes, ${g.links.length} relationships`
+            + `\nfrom ${records.length} rows in ${Math.round(tQuery)} ms`;
+    if (g.stubs) msg += `\n${g.stubs} endpoint(s) not returned by the query — shown as placeholder nodes`;
+    if (truncated) msg += `\n${truncated} extra rows discarded by the client-side limit`;
+    if (!g.nodes.length) msg += `\n\nNo graph entities found. Return nodes/relationships/paths (e.g. RETURN n, r, m), or columns named "source" and "target".`;
+    status(msg, g.nodes.length ? "ok" : "");
+  } catch (e) {
+    status(explain(e), "err");
+  } finally {
+    if (session) await session.close();
+    btn.disabled = false;
+  }
+}
+
+function explain(e) {
+  const m = (e && e.message) || String(e);
+  let hint = "";
+  if (/WebSocket|ServiceUnavailable|Failed to fetch|connection/i.test(m)) {
+    hint = "\n\nThe browser speaks Bolt over WebSocket. Check:"
+         + "\n• host/port reachable, database started"
+         + "\n• an https:// page cannot open a plaintext bolt:// (ws://) connection — open this file"
+         + " via file:// or http://localhost when targeting a local database"
+         + "\n• a self-signed certificate on a +s URI must be trusted by the browser first"
+         + " (or use neo4j+ssc:// for a self-signed cert)";
+  } else if (/authentication|unauthorized|credentials/i.test(m)) {
+    hint = "\n\nCheck user/password, and whether the target requires a specific database.";
+  } else if (/database does not exist|DatabaseNotFound/i.test(m)) {
+    hint = "\n\nCheck the database name (leave blank to use the server default).";
+  }
+  return m + hint;
+}
+
+/* ------------------------------------------------------------------ *
+ * Settings persistence
+ * ------------------------------------------------------------------ */
+// Bumped when the shipped defaults change: a saved blob wins over DEFAULTS, so
+// without a new key an older build's connection details come straight back.
+const KEY = "neo4j-3d-explorer.v2";
+// The pre-v2 blob is now orphaned and may hold a saved password; drop it.
+try { localStorage.removeItem("neo4j-3d-explorer"); } catch (e) {}
+function saveSettings() {
+  const s = {
+    uri: $("uri").value, user: $("user").value, db: $("db").value,
+    limit: $("limit").value, query: $("query").value,
+    savePass: $("savePass").checked, pass: $("savePass").checked ? $("pass").value : "",
+    controlType: $("controlType").value, pinDrag: $("pinDrag").checked,
+    arrows: $("arrows").checked,
+    theme: $("theme").value, linkOpacity: $("linkOpacity").value, linkWidth: $("linkWidth").value,
+    colorKey, sizeKey, captionKey
+  };
+  try { localStorage.setItem(KEY, JSON.stringify(s)); } catch (e) {}
+}
+function loadSettings() {
+  let s = {};
+  try { s = JSON.parse(localStorage.getItem(KEY) || "{}"); } catch (e) {}
+  const v = Object.assign({}, DEFAULTS, s);
+  $("uri").value = v.uri; $("user").value = v.user; $("pass").value = v.pass || "";
+  $("db").value = v.db; $("limit").value = v.limit; $("query").value = v.query;
+  $("savePass").checked = !!v.savePass; $("controlType").value = v.controlType;
+  $("pinDrag").checked = !!v.pinDrag; $("arrows").checked = !!v.arrows;
+  $("theme").value = v.theme; $("linkOpacity").value = v.linkOpacity; $("linkWidth").value = v.linkWidth;
+  colorKey = v.colorKey || "__label"; sizeKey = v.sizeKey || "__none"; captionKey = v.captionKey || "__auto";
+}
+
+/* ------------------------------------------------------------------ *
+ * Wire-up
+ * ------------------------------------------------------------------ */
+$("preset").innerHTML = '<option value="">— choose —</option>' +
+  Object.keys(PRESETS).map(k => `<option value="${esc(k)}">${esc(k)}</option>`).join("");
+$("preset").onchange = e => {
+  if (PRESETS[e.target.value]) { $("query").value = PRESETS[e.target.value]; saveSettings(); }
+  e.target.value = "";
+};
+
+loadSettings();
+refreshSelectors([]);
+applyTheme();
+buildGraph();
+
+$("run").onclick = run;
+$("clear").onclick = () => {
+  data = { nodes: [], links: [] };
+  Graph.graphData(data);
+  $("details").style.display = "none";
+  status("Cleared.");
+};
+$("fit").onclick = () => { fitTimers.forEach(clearTimeout); Graph.zoomToFit(600, 60); };
+$("unpin").onclick = () => {
+  for (const n of data.nodes) n.fx = n.fy = n.fz = undefined;
+  Graph.d3ReheatSimulation();
+};
+$("toggle").onclick = () => { $("side").classList.toggle("collapsed"); setTimeout(sizeGraph, 0); };
+
+$("controlType").onchange = () => { saveSettings(); buildGraph(); };
+for (const id of ["arrows"]) $(id).onchange = () => { applyDisplay(); saveSettings(); };
+$("theme").onchange = () => { applyTheme(); saveSettings(); };
+for (const id of ["linkOpacity", "linkWidth"])
+  $(id).addEventListener("input", () => { applyDisplay(); saveSettings(); });
+$("colorBy").onchange = e => { colorKey = e.target.value; recolor(); saveSettings(); };
+$("sizeBy").onchange = e => { sizeKey = e.target.value; rescaleSizes(data.nodes); applyDisplay(); saveSettings(); };
+$("captionBy").onchange = e => { captionKey = e.target.value; applyDisplay(); saveSettings(); };
+
+function recolor() {
+  // nodeAutoColorBy only paints nodes with no `color`; clear the previous pass first.
+  for (const n of data.nodes) delete n.color;
+  applyDisplay();
+  Graph.graphData(data);
+}
+
+for (const id of ["uri", "user", "pass", "db", "limit", "query", "savePass", "pinDrag"])
+  $(id).addEventListener("change", saveSettings);
+
+$("query").addEventListener("keydown", e => {
+  if ((e.metaKey || e.ctrlKey) && e.key === "Enter") { e.preventDefault(); run(); }
+});
+
+status("Ready. Fill in the connection and press Run.\nCmd/Ctrl+Enter in the query box also runs.");
+</script>
+</body>
+</html>

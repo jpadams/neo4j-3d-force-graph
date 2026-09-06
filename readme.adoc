@@ -1,140 +1,96 @@
-:base: https://rawgit.com/jexp/neo4j-3d-force-graph/master
+= Neo4j 3D Graph Explorer
 
-Some experiments using Data in Neo4j to render 3d graphs using three-js via https://github.com/vasturiano/3d-force-graph[3d-force-graph] which is a really cool repository.
+Connect to any Neo4j database over Bolt, run any Cypher, and render the result as a
+3D force-directed graph you can rotate, zoom and rearrange.
 
-These pages use the latest Neo4j javascript driver to query the graph for some basic data and render it in the 3d-graph.
+One self-contained file — `neo4j-3d.html`. No build step, no dependencies to install.
+Open it directly (`open neo4j-3d.html`) or serve it (`python3 -m http.server`).
 
-Please note that the JS driver uses a custom Number object, which we have to turn into JS integers with `value.toNumber()` and wrap int values we send to the server like the limit in `neo4j.int`.
+Built on https://github.com/vasturiano/3d-force-graph[3d-force-graph] (three.js) and the
+Neo4j JavaScript driver, both pinned from a CDN.
 
-The example pages load 5000 relationships from the GameOfThrones graph at link:bolt://demo.neo4jlabs.com[https://demo.neo4jlabs.com:7473]
-You might need to change auth and database (default: database/user/password: gameofthrones)
+== Connecting
 
-== Basic Loading
+Encryption comes from the URI scheme. Do *not* also pass an `encrypted` option — modern
+drivers reject both together.
 
-basic loading: just using the id's (fastest)
+[cols="1,3"]
+|===
+| `bolt://localhost:7687` | local server, unencrypted (the default)
+| `neo4j+s://<host>` | Aura, or any server with a valid certificate
+| `neo4j+ssc://<host>` | self-signed certificate
+|===
+
+The browser speaks Bolt over WebSocket, which constrains the plaintext case: an `https://`
+page cannot open a `ws://` connection. To reach a local database, open this file over
+`file://` or `http://localhost` — not from an https host.
+
+The password is only written to `localStorage` if you tick the box.
+
+== Rendering any result
+
+It does not assume a result shape. It walks every field of every record — recursing into
+lists and maps — and picks out graph entities using the driver's own type predicates:
+
+[source,javascript]
+----
+if (neo4j.isNode(v))         addNode(v);
+if (neo4j.isRelationship(v)) addRel(v);
+if (neo4j.isPath(v))         for (const seg of v.segments) { ... }
+----
+
+So all of these work with no configuration:
 
 [source,cypher]
 ----
-MATCH (n)-->(m) RETURN id(n) as source, id(m) as target LIMIT $limit
+MATCH (n)-[r]->(m) RETURN n, r, m            // entities
+MATCH p = ()-[*1..2]-() RETURN p             // paths
+CALL db.schema.visualization()               // entities nested inside lists
+MATCH (n)-->(m)                              // scalar fallback: no entities returned,
+RETURN n.name AS source, m.name AS target    // so `source`/`target` columns are used
 ----
 
-[source,javascript]
-----
-ForceGraph3D()(document.getElementById('3d-graph')).graphData(gData)
-----
+Nodes are keyed on `elementId` (a string) rather than `id(n)` — element ids can exceed
+`2^53`, so calling `.toNumber()` on an identity is lossy. Neo4j `Integer`, temporal, point
+and vector values are converted to primitives before display, so the details panel shows
+`300` rather than `{low: 300, high: 0}`. Long arrays such as embeddings are summarised.
 
-image::{base}/basic.jpg[width=600]
+Relationships whose endpoints the query didn't return are kept and given placeholder
+nodes rather than being dropped; the status line reports how many.
 
-link:{base}/index.html[Render Example^] | link:index.html[Code^]
+`$limit` is bound to the limit box, so `LIMIT $limit` works in your own queries. The same
+value also caps rows client-side.
 
-== Incremental Loading
+== Moving it around in 3D
 
-Incremental loading: each row from the driver result is added to the graph incrementally
+* drag the background to rotate, scroll to zoom, right-drag to pan
+* drag a node to reposition it; with *Pin nodes where I drop them* on, it stays there
+  (`fx/fy/fz`) instead of springing back. *Unpin all* releases them
+* *Camera controls* switches between trackball (free rotation), orbit (keeps the horizon
+  upright) and fly (WASD/RF + mouse look)
+* click a node for its properties, with *Focus* to fly the camera to it
 
-[source,javascript]
-----
-result.records.forEach(r => { 
-   const { nodes, links } = Graph.graphData();
-   const link={source:r.get('source').toNumber(), target:r.get('target').toNumber()}
-   Graph.graphData({
-        nodes: [...nodes, { id:link.source }, { id: link.target}],
-        links: [...links, link]
-    });
-});        
-----
+Colour, size and caption are driven by dropdowns populated from the properties actually
+present in the result, so `pagerank`, `community` and the like appear automatically when
+they exist. Sizes are normalised onto a fixed range, since raw property values span
+arbitrary scales.
 
-link:{base}/incremental.html[Render Example^] | link:incremental.html[Code^]
+== Seeing the relationships
 
-== Color and Caption
+Dense graphs live or die on how readable the edges are, so three controls target that:
 
+* *Theme* — dark or light. Light is usually clearer once there are more edges than nodes:
+  dark lines on white hold contrast better than pale lines on black.
+* *Relationship contrast* — link opacity.
+* *Relationship thickness* — at `0` (the default) links draw as constant-width 1px lines
+  that stay visible however far you zoom out. Above `0` they become 3D tubes, which look
+  better up close but shrink into invisibility at distance.
 
-color by label and text caption on hover
+One trap worth naming: set opacity in `linkOpacity` *only*. If you also bake an alpha into
+`linkColor` (`rgba(...)`) the two multiply and the relationships all but disappear.
 
+== History
 
-[source,cypher]
-----
-MATCH (n)-->(m) 
-RETURN { id: id(n), label:head(labels(n)), caption:n.name } as source, 
-       { id: id(m), label:head(labels(m)), caption:m.name } as target 
-LIMIT $limit
-----
-
-[source,javascript]
-----
-const Graph = ForceGraph3D()(elem)
-              .graphData(gData)
-              .nodeAutoColorBy('label')
-              .nodeLabel(node => `${node.label}: ${node.caption}`)
-              .onNodeHover(node => elem.style.cursor = node ? 'pointer' : null);
-----
-
-link:{base}/color.html[Render Example^] | link:color.html[Code^]
-
-
-.Color and Caption on Paradise Papers
-image::{base}/labels-info.jpg[width=600]
-
-== Weights for Node and Relationship Sizes
-
-Use weight on node (e.g. pagerank) and on relationship to render different sizes.
-Also color relationships by type. We use log(weight) for relationships as they would groth too thick otherwise.
-
-[source,cypher]
-----
-MATCH (n)-[r]->(m) 
-RETURN { id: id(n), label:head(labels(n)), caption:n.name, size:n.pagerank } as source, 
-       { id: id(m), label:head(labels(m)), caption:m.name, size:m.pagerank } as target, 
-       { weight:log(r.weight), type:type(r)} as rel 
-LIMIT $limit
-----
-
-[source,javascript]
-----
-const Graph = ForceGraph3D()(elem)
-              .graphData(gData)
-              .nodeAutoColorBy('label')
-              .nodeVal('size')
-              .linkAutoColorBy('type')
-              .linkWidth('weight')
-              .nodeLabel(node => `${node.label}: ${node.caption}`)
-              .onNodeHover(node => elem.style.cursor = node ? 'pointer' : null);
-----
-
-
-link:{base}/weights.html[Render Example^] | link:weights.html[Code^]
-
-.Weights on Game Of Thrones
-image::{base}/weights-got.jpg[width=600]
-
-== Particles & Cluster Coloring
-
-Color nodes and relationships by community/cluster id.
-Use particles for relationships to render their weight, here we use the original weight as it represents the number of particles traveling.
-
-[source,cypher]
-----
-MATCH (n)-[r]->(m) 
-RETURN { id: id(n), label:head(labels(n)), community:n.louvain, caption:n.name, size:n.pagerank } as source, 
-       { id: id(m), label:head(labels(m)), community:n.louvain, caption:m.name, size:m.pagerank } as target, 
-       { weight:r.weight, type:type(r), community:case when n.community < m.community then n.community else m.community end} as rel 
-LIMIT $limit
-----
-
-[source,javascript]
-----
-const Graph = ForceGraph3D()(elem)
-              .graphData(gData)
-              .nodeAutoColorBy('community')
-              .nodeVal('size')
-              .linkAutoColorBy('community')
-              .linkWidth(0)
-              .linkDirectionalParticles('weight') // number of particles
-              .linkDirectionalParticleSpeed(0.001) // slow down
-              .nodeLabel(node => `${node.label}: ${node.caption}`)
-              .onNodeHover(node => elem.style.cursor = node ? 'pointer' : null);
-----
-
-link:{base}/particles.html[Render Example^] | link:particles.html[Code^]
-
-.Particles and Clusters on Game Of Thrones
-image::{base}/particles-got.jpg[width=600]
+This repository previously held a set of fixed demo pages, each hardcoding one query
+against a Game of Thrones dataset, plus a small React 2D viewer. `neo4j-3d.html` replaces
+all of them with a single generic tool. The originals are in the git history.
